@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Command Client</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin-top: 50px; background: #f0f2f5; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; width: 300px; }
+        h1 { margin-bottom: 20px; font-size: 24px; color: #333; }
+        
+        /* Button Styling */
+        button {
+            padding: 15px 30px; font-size: 16px; border: none; border-radius: 50px; cursor: pointer;
+            transition: all 0.2s; font-weight: bold; width: 100%;
+        }
+        .btn-start { background-color: #2563eb; color: white; }
+        .btn-start:hover { background-color: #1d4ed8; }
+        .btn-stop { background-color: #dc2626; color: white; }
+        .btn-stop:hover { background-color: #b91c1c; }
+
+        /* Status & Result Styling */
+        #status { margin-top: 15px; font-size: 14px; color: #666; }
+        .result-box { margin-top: 20px; padding: 15px; background: #f3f4f6; border-radius: 8px; min-height: 50px; }
+        #prediction { font-size: 24px; font-weight: bold; color: #2563eb; }
+        #confidence { font-size: 14px; color: #888; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Voice Commands</h1>
+        
+        <button id="toggleBtn" class="btn-start">Start Recording</button>
+        <div id="status">Ready</div>
+
+        <div class="result-box">
+            <div id="prediction">...</div>
+            <div id="confidence">Confidence: -</div>
+        </div>
+    </div>
+
+        
+<script>
+        // --- Configuration ---
+        const WS_URL = "ws://localhost:8000/ws/audio";
+        const SAMPLE_RATE = 16000;
+        
+        // --- State Variables ---
+        let socket = null;
+        let audioContext = null;
+        let processor = null;
+        let mediaStream = null;
+        let isRecording = false;
+
+        // --- DOM Elements ---
+        const btn = document.getElementById('toggleBtn');
+        const statusEl = document.getElementById('status');
+        const predEl = document.getElementById('prediction');
+        const confEl = document.getElementById('confidence');
+
+        btn.addEventListener('click', toggleRecording);
+
+        async function toggleRecording() {
+            if (!isRecording) {
+                await startRecording();
+            } else {
+                stopRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                console.log("Starting recording...");
+                // 1. Initialize Audio FIRST (capture the user gesture)
+                statusEl.textContent = "Requesting Microphone...";
+                
+                // This must happen directly after the click
+                await initAudio(); 
+
+                // 2. Connect WebSocket AFTER audio is ready
+                statusEl.textContent = "Connecting to server...";
+                socket = new WebSocket(WS_URL);
+
+                socket.onopen = () => {
+                    // Update UI
+                    isRecording = true;
+                    btn.textContent = "Stop Recording";
+                    btn.className = "btn-stop";
+                    statusEl.textContent = "Listening...";
+                    predEl.textContent = "...";
+                };
+
+                socket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    predEl.textContent = data.detected;
+                    if(data.confidence) {
+                        confEl.textContent = `Confidence: ${(data.confidence * 100).toFixed(1)}%`;
+                    }
+                };
+
+                socket.onclose = () => {
+                    console.log("Socket closed");
+                    if (isRecording) stopRecording();
+                };
+
+                socket.onerror = (error) => {
+                    console.error("WebSocket Error:", error);
+                    statusEl.textContent = "Connection Error";
+                };
+
+            } catch (err) {
+                console.error(err);
+                statusEl.textContent = "Error: " + err.message;
+                // If audio failed, clean up
+                stopRecording(); 
+            }
+        }
+
+        async function initAudio() {
+            // Access Microphone
+            mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            // Create Audio Context
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: SAMPLE_RATE
+            });
+
+            // CRITICAL: Ensure context is running
+            if (audioContext.state === 'suspended') {
+                await audioContext.resume();
+            }
+
+            const source = audioContext.createMediaStreamSource(mediaStream);
+
+            // ScriptProcessor (Buffer Size 4096)
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+            processor.onaudioprocess = (e) => {
+                // Only send if socket is open
+                if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+                const inputData = e.inputBuffer.getChannelData(0);
+
+                // Convert float32 -> Int16
+                const pcmData = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    let s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+
+                socket.send(pcmData.buffer);
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+
+        function stopRecording() {
+            console.log("Stopping recording...");
+            isRecording = false;
+
+            // UI Reset
+            btn.textContent = "Start Recording";
+            btn.className = "btn-start";
+            statusEl.textContent = "Stopped";
+
+            // Cleanup
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(track => track.stop());
+                mediaStream = null;
+            }
+        }
+    </script>
+</body>
+</html>

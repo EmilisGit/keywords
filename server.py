@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import HTMLResponse
+import time
 
 SAMPLE_RATE = 16000
 CHUNK_DURATION = 1.0
@@ -78,10 +79,23 @@ async def audio_endpoint(websocket: WebSocket):
                 audio_np = np.frombuffer(window_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
                 model_input = audio_np.reshape(1, 16000)
+                inference_start = time.time()
                 result = instructions_model(model_input)
+                inference_end = time.time()
+                time_taken = round(inference_end - inference_start, 5)
                 
                 class_name = result['class_names'].numpy()[0].decode('utf-8')
-                await websocket.send_json({"detected": class_name})
+
+                # Get confidence
+                class_id = int(result["class_ids"].numpy()[0])
+                logits = result["predictions"].numpy()[0]
+                softmax = tf.nn.softmax(logits).numpy()
+                confidence = float(softmax[class_id])
+
+                await websocket.send_json({
+                   "detected": class_name, 
+                   "confidence": float(confidence),
+                   "inference_time": float(time_taken)})
 
                 del audio_buffer[:STEP_SIZE * 2]
                 
